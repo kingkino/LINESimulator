@@ -12,6 +12,6 @@
 		"socket.io": "^2.0.4"
 	},
 	"scripts": {
-		"start": "start http://localhost:8080 && node app.js"		
+		"start": "start http://localhost:8080 && node app.js"
 	}
 }
