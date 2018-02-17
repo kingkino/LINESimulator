@@ -1,5 +1,6 @@
 // Dependencies.
 var express = require('express');
+var path = require('path');
 var bodyParser = require("body-parser");
 var fs = require('fs');
 var request = require('request');
@@ -10,12 +11,15 @@ var crypto = require('crypto');
 var botAPIAddress;
 var channelSecret;
 var channelToken;
+var pocMode;
+var richMenuId;
 
 // Specifie body parsers
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: false }));
+app.use(bodyParser.raw({ limit: '50mb', type: '*/*' }));
 // Return all static files such as css and js in public folder.
-app.use(express.static('public'))
+app.use(express.static(__dirname + '/public'))
 
 /* Routing  */
 // For root, return the emulator
@@ -29,36 +33,42 @@ app.post('/channelSettings', function (req, res) {
     channelSecret = req.body.channelSecret;
     channelToken = req.body.channelToken;
     request({
-        headers: {"Authorization": "Bearer " + channelToken},
+        headers: { "Authorization": "Bearer " + channelToken },
         uri: `${lineAPIUrl}bot/profile/${req.body.userId}`,
         method: "GET"
     },
         function (error, response, body) {
-            if(body.indexOf("userId") == -1){
+            if (body.indexOf("userId") == -1) {
                 res.status(response.statusCode).send(body);
             }
-            else{
+            else {
                 return res.send(body);
             }
         }
-    );    
+    );
+});
+
+// Set pocMode.
+app.post('/pocMode', function (req, res) {
+    pocMode = req.body.pocMode;
+    return res.sendStatus(200);
 });
 
 // Receive file from client and send appropriate event to API.
 app.post('/upload', function (req, res) {
     // Generate contentId by using time and copy the file into upload folder.
-    var contentId = Date.now();
-    if(!fs.existsSync(`${__dirname}\\public\\temp`)){
-        fs.mkdirSync(`${__dirname}\\public\\temp`);
+    var contentId = Date.now().toString();
+    if (!fs.existsSync(path.join(__dirname, 'public', 'temp'))) {
+        fs.mkdirSync(path.resolve(__dirname, 'public', 'temp'));
     }
-    if (!fs.existsSync(`${__dirname}\\public\\temp\\${contentId}`)) {
-        fs.mkdirSync(`${__dirname}\\public\\temp\\${contentId}`);
+    if (!fs.existsSync(path.join(__dirname, 'public', 'temp', contentId))) {
+        fs.mkdirSync(path.resolve(__dirname, 'public', 'temp', contentId));
     }
     // Create message depending on file type (extension)
     var splitFileName = req.body.filename.split('\\');
     var filename = splitFileName[splitFileName.length - 1];
-    var filePath = `\\temp\\${contentId}\\${filename}`;
-    var fileFullPath = `${__dirname}\\public\\temp\\${contentId}\\${filename}`;
+    var filePath = path.join('temp', contentId, filename);
+    var fileFullPath = path.join(__dirname, 'public', 'temp', contentId, filename);
     if (req.body.base64string) {
         fs.writeFileSync(fileFullPath, new Buffer(req.body.base64string.split(',')[1], 'base64'));
     } else {
@@ -90,29 +100,31 @@ app.post('/upload', function (req, res) {
         }
     };
 
-    var jsonData = JSON.stringify({ "events": [sendObject] });
-    var signature = crypto.createHmac("SHA256", channelSecret)
-        .update(jsonData)
-        .digest().toString('base64');
+    if (pocMode === "false") {
+        var jsonData = JSON.stringify({ "events": [sendObject] });
+        var signature = crypto.createHmac("SHA256", channelSecret)
+            .update(jsonData)
+            .digest().toString('base64');
 
-    // Send request.
-    request({
-        headers: {
-            "X-Line-Signature": signature
+        // Send request.
+        request({
+            headers: {
+                "X-Line-Signature": signature,
+                "Content-Type": "application/json"
+            },
+            uri: botAPIAddress,
+            body: jsonData,
+            method: 'POST'
         },
-        uri: botAPIAddress,
-        body: jsonData,
-        method: 'POST'
-    },
-        function (error, response, body) {
-            // handle result if necessary.
-        }
-    );
-
+            function (error, response, body) {
+                // handle result if necessary.
+            }
+        );
+    }
     res.send({ "filePath": filePath, "sendObject": sendObject });
 });
 
-/* send request */
+/* send request to your bot application */
 app.post('/send', function (req, res) {
     var jsonData = JSON.stringify(req.body);
     // Generate hash based on https://developers.line.me/en/docs/messaging-api/reference/#signature-validation
@@ -120,101 +132,102 @@ app.post('/send', function (req, res) {
         .update(jsonData)
         .digest().toString('base64');
 
-    request({
-        headers: {
-            "X-Line-Signature": signature
+    request(
+        {
+            headers: {
+                "X-Line-Signature": signature,
+                "Content-Type": "application/json"
+            },
+            uri: botAPIAddress,
+            body: jsonData,
+            method: 'POST'
         },
-        uri: botAPIAddress,
-        body: jsonData,
-        method: 'POST'
-    },
         function (error, response, body) {
-            // handle result if necessary.
+            res.sendStatus(response.statusCode);
         }
     );
 });
 
+/* Get Rich menu for user */
+app.get('/richmenu/:userId/:richMenuId', function (req, res) {
+    // Generate hash based on https://developers.line.me/en/docs/messaging-api/reference/#signature-validation
+    let url = `bot/user/${req.params.userId}/richmenu`;
+    richMenuId = req.params.richMenuId;
+    request({
+        headers: { 'Authorization': `Bearer ${channelToken}` },
+        uri: `${lineAPIUrl}${url}`,
+        method: "GET"
+    }, function (error, response, body) {
+        if (JSON.parse(response.body).message === "the user has no richmenu") {
+            res.send({ "message": "no menu" });
+        }
+        // If rich menuId is same as passed one, do nothing.
+        else if (JSON.parse(response.body).richMenuId == richMenuId) {
+            res.send(null);
+        }
+        // otherwise get the richmenu.
+        else {
+            richMenuId = JSON.parse(response.body).richMenuId;
+            url = `bot/richmenu/${richMenuId}/content`;
+            request({
+                headers: { 'Authorization': `Bearer ${channelToken}` },
+                encoding: null,
+                uri: `${lineAPIUrl}${url}`,
+                method: "GET"
+
+            }, function (error, response, body) {
+                var image = body;
+                url = `bot/richmenu/${richMenuId}`;
+                request({
+                    headers: { 'Authorization': `Bearer ${channelToken}` },
+                    uri: `${lineAPIUrl}${url}`,
+                    method: "GET"
+                }, function (error, response, body) {
+                    res.send({ "richMenu": JSON.parse(body), "image": image });
+                });
+            });
+        }
+    });
+});
 
 //#region Behave as LINE Platform
 const lineAPIUrl = "https://api.line.me/v2/";
 
-// Issue channel access token
-// https://developers.line.me/en/docs/messaging-api/reference/#issue-channel-access-token
-app.post('/oauth/accessToken', function (req, res) {
-    // Return 
-    request({
-        headers: req.headers,
-        uri: `${lineAPIUrl}/oauth/accessToken`,
-        method: 'POST',
-        body: req.body
-    },
-        function (error, response, body) {
-            res.send(body);
-        }
-    );
-});
-
-// Revoke channel access token
-// https://developers.line.me/en/docs/messaging-api/reference/#revoke-channel-access-token
-app.post('/oauth/revoke', function (req, res) {
-    // Do nothing. just return 200.
-    request({
-        headers: req.headers,
-        uri: `${lineAPIUrl}/oauth/revoke`,
-        method: 'POST',
-        body: req.body
-    },
-        function (error, response, body) {
-            res.send(body);
-        }
-    );
-});
-
-// Send reply message
-// https://developers.line.me/en/docs/messaging-api/reference/#send-reply-message
-app.post('/bot/message/reply', function (req, res) {
-    // Once received reply from API, simply pass it to client via socket and return success.
-    io.emit('reply', req.body);
-    res.sendStatus(200);
-});
-
-// Send push message
-// https://developers.line.me/en/docs/messaging-api/reference/#send-push-message
-app.post('/bot/message/push', function (req, res) {
-    // Once received push from API, simply pass it to client by socket and return success.
-    io.emit('reply', req.body);
-    res.sendStatus(200);
-});
-
-// Send multicast messages
-// https://developers.line.me/en/docs/messaging-api/reference/#send-multicast-messages
-app.post('/bot/message/multicast', function (req, res) {
-    // Once received multicast from API, simply pass it to client by socket and return success.
-    io.emit('reply', req.body);
-    res.sendStatus(200);
-});
-
-// Get content
-// https://developers.line.me/en/docs/messaging-api/reference/#get-content
-app.get('/bot/message/:messageId/content', function (req, res) {
-    // The actual file sit in public\temp. Returns the file.
-    var files = fs.readdirSync(`${__dirname}\\public\\temp\\${req.params.messageId}`);
-    res.sendFile(`${__dirname}\\public\\temp\\${req.params.messageId}\\${files[0]}`);
-});
-
-// Redirect to LINE Platform if not handling in the app.
-app.all('/bot/*', function (req, res) {
-    // Redirect request to LINE Platform, then return the result.
-    handleRequest(req, res);
+// Receive request from your bot application.
+app.all('/*', function (req, res) {
+    var url = req.url;
+    // reply, push and multicast will be simply pass to UI.
+    if (url.indexOf('reply') > -1 || url.indexOf('push') > -1 || url.indexOf('multicast') > -1) {
+        io.emit('reply', req.body);
+        res.sendStatus(200);
+    }
+    // if it request content
+    else if (url.indexOf('content') > -1) {
+        // The actual file sit in public\temp. Returns the file with messageId
+        let messageId = url.slice(url.indexOf('message') + 8, url.indexOf('content') - 1);
+        var files = fs.readdirSync(path.join(__dirname, 'public', 'temp', messageId));
+        res.sendFile(path.join(__dirname, 'public', 'temp', messageId, files[0]));
+    }
+    else {
+        handleRequest(req, res);
+    }
 });
 
 // Handle all request by add LINE Platform Url.
 function handleRequest(req, res) {
     // remove host header
     delete req.headers['host'];
+    // Craft URL for LINE Platform.
+    var url = req.url;
+    if (url.indexOf('oauth') > -1) {
+        url = url.slice(url.indexOf('oauth'), url.length);
+    }
+    else if (url.indexOf('bot') > -1) {
+        url = url.slice(url.indexOf('bot'), url.length);
+    }
     request({
         headers: req.headers,
-        uri: `${lineAPIUrl}${req.url}`,
+        uri: `${lineAPIUrl}${url}`,
         method: req.method
     },
         function (error, response, body) {
